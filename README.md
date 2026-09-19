@@ -59,7 +59,7 @@ Create a project, then run the migrations in order against it — either paste
 them into the SQL editor or, with the CLI linked:
 
 ```bash
-npx supabase link --project-ref <your-ref>
+npx supabase link --project-ref ioljpwepyehxdaxbrvit
 npx supabase db push
 ```
 
