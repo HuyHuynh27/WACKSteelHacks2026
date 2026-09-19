@@ -1,0 +1,160 @@
+"use client";
+
+import { useRef, useState, useTransition } from "react";
+import { Plus } from "lucide-react";
+import { toast } from "sonner";
+
+import { createMaterial } from "@/app/(app)/materials/actions";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+
+const UNITS = ["kg", "lb", "metric ton", "short ton", "L", "gal", "m", "ft", "m²", "unit"];
+
+export function AddMaterialDialog() {
+  const [open, setOpen] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [pending, startTransition] = useTransition();
+  const formRef = useRef<HTMLFormElement>(null);
+
+  // Called imperatively rather than through useActionState so the success path
+  // can reset the form and close the dialog without a state-setting effect.
+  function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const formData = new FormData(event.currentTarget);
+
+    startTransition(async () => {
+      const result = await createMaterial(formData);
+      if (result.error) {
+        setError(result.error);
+        return;
+      }
+      setError(null);
+      toast.success(result.message);
+      formRef.current?.reset();
+      setOpen(false);
+    });
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger render={<Button size="sm" />}>
+        <Plus className="size-4" aria-hidden />
+        Add material
+      </DialogTrigger>
+
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Add a raw material</DialogTitle>
+          <DialogDescription>
+            Name it the way your team does — the mapper matches it to a public
+            price series on the next ingestion run.
+          </DialogDescription>
+        </DialogHeader>
+
+        <form ref={formRef} onSubmit={handleSubmit} className="space-y-4">
+          <div className="space-y-2">
+            <Label htmlFor="name">Material name</Label>
+            <Input id="name" name="name" placeholder="6061 aluminium extrusion" required />
+          </div>
+
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="space-y-2">
+              <Label htmlFor="category">Category</Label>
+              <Input id="category" name="category" placeholder="Metals" />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="unit">Unit of purchase</Label>
+              <Select name="unit" defaultValue="kg">
+                <SelectTrigger id="unit" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {UNITS.map((unit) => (
+                    <SelectItem key={unit} value={unit}>
+                      {unit}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+
+          <div className="grid gap-4 sm:grid-cols-3">
+            <div className="space-y-2">
+              <Label htmlFor="baseline_price">Price you pay</Label>
+              <Input
+                id="baseline_price"
+                name="baseline_price"
+                type="number"
+                step="0.0001"
+                min="0"
+                placeholder="2.85"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="currency">Currency</Label>
+              <Input
+                id="currency"
+                name="currency"
+                defaultValue="USD"
+                maxLength={3}
+                className="uppercase"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="alert_threshold_pct">Alert at ±%</Label>
+              <Input
+                id="alert_threshold_pct"
+                name="alert_threshold_pct"
+                type="number"
+                step="0.5"
+                min="0"
+                defaultValue="5"
+              />
+            </div>
+          </div>
+
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="space-y-2">
+              <Label htmlFor="supplier">Supplier</Label>
+              <Input id="supplier" name="supplier" placeholder="Midwest Metals" />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="sku">Your SKU</Label>
+              <Input id="sku" name="sku" placeholder="AL-6061-EX" />
+            </div>
+          </div>
+
+          {error && (
+            <p className="text-sm text-destructive" role="alert">
+              {error}
+            </p>
+          )}
+
+          <DialogFooter>
+            <Button type="submit" disabled={pending}>
+              {pending ? "Adding…" : "Add material"}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}

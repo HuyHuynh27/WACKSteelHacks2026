@@ -1,0 +1,51 @@
+name: Ingest prices
+
+on:
+  schedule:
+    # 11:20 UTC on weekdays — after FRED's usual morning refresh.
+    - cron: "20 11 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      step:
+        description: Which step to run
+        required: true
+        default: all
+        type: choice
+        options: [all, map, sync, alerts, dispatch]
+
+# Two overlapping runs would double-post alerts.
+concurrency:
+  group: ingest
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: ingestion
+
+    env:
+      NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      ANTHROPIC_MODEL: ${{ vars.ANTHROPIC_MODEL || 'claude-opus-5' }}
+      APP_BASE_URL: ${{ vars.APP_BASE_URL }}
+      CRON_SECRET: ${{ secrets.CRON_SECRET }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: ingestion/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run ingestion
+        run: python run.py ${{ inputs.step || 'all' }}
