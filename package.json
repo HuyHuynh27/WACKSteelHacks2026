@@ -10,7 +10,9 @@
     "typecheck": "tsc --noEmit",
     "gen:vapid": "node scripts/generate-vapid.mjs",
     "db:push": "supabase db push",
-    "gen:icons": "node scripts/generate-icons.mjs"
+    "gen:icons": "node scripts/generate-icons.mjs",
+    "test": "node --experimental-strip-types --test 'src/**/__tests__/*.test.ts'",
+    "verify:push": "node --env-file=.env.local scripts/verify-push.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.8.0",

@@ -1,6 +1,6 @@
 /* Better RAW service worker — offline shell + web push. */
 
-const CACHE = "better-raw-v1";
+const CACHE = "better-raw-v2";
 const APP_SHELL = ["/", "/dashboard", "/offline", "/manifest.webmanifest"];
 
 self.addEventListener("install", (event) => {
@@ -65,14 +65,116 @@ self.addEventListener("push", (event) => {
 
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
-  const target = event.notification.data?.url || "/alerts";
+
+  const data = event.notification.data || {};
+  const target = data.url || "/alerts";
 
   event.waitUntil(
-    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clientList) => {
-      for (const client of clientList) {
-        if (client.url.includes(target) && "focus" in client) return client.focus();
+    (async () => {
+      // Tapping the notification is as good as reading the alert. Fire and
+      // forget — a failure here must not stop the app from opening.
+      if (data.alertId) {
+        try {
+          await fetch("/api/push/ack", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            credentials: "include",
+            body: JSON.stringify({ alertId: data.alertId }),
+          });
+        } catch {
+          /* offline, or signed out — the alert just stays unread. */
+        }
       }
-      return self.clients.openWindow(target);
-    }),
+
+      const targetUrl = new URL(target, self.location.origin);
+      const clientList = await self.clients.matchAll({
+        type: "window",
+        includeUncontrolled: true,
+      });
+
+      // Reuse an open window rather than piling up tabs, navigating it to the
+      // material the alert is about.
+      for (const client of clientList) {
+        if (new URL(client.url).origin !== targetUrl.origin) continue;
+        if ("focus" in client) {
+          const focused = await client.focus();
+          if (focused && "navigate" in focused && focused.url !== targetUrl.href) {
+            try {
+              await focused.navigate(targetUrl.href);
+            } catch {
+              /* Cross-document navigation can be refused; focus is enough. */
+            }
+          }
+          return;
+        }
+      }
+
+      await self.clients.openWindow(targetUrl.href);
+    })(),
+  );
+});
+
+/* VAPID keys arrive base64url; PushManager wants a Uint8Array. */
+function urlBase64ToUint8Array(base64) {
+  const padding = "=".repeat((4 - (base64.length % 4)) % 4);
+  const normalised = (base64 + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const raw = self.atob(normalised);
+  return Uint8Array.from(raw, (char) => char.charCodeAt(0));
+}
+
+/**
+ * Browsers rotate push subscriptions on their own schedule. Without this the
+ * stored endpoint goes stale and alerts stop arriving with no visible error —
+ * so re-subscribe and hand the server the new endpoint.
+ */
+self.addEventListener("pushsubscriptionchange", (event) => {
+  event.waitUntil(
+    (async () => {
+      const oldSubscription = event.oldSubscription;
+      const oldEndpoint = oldSubscription?.endpoint;
+
+      // Prefer the key the old subscription was created with; fall back to
+      // asking the server, since a SW cannot read NEXT_PUBLIC_* itself.
+      let applicationServerKey = oldSubscription?.options?.applicationServerKey;
+      if (!applicationServerKey) {
+        const response = await fetch("/api/push/vapid-key");
+        if (!response.ok) return;
+        const { key } = await response.json();
+        applicationServerKey = urlBase64ToUint8Array(key);
+      }
+
+      const subscription =
+        event.newSubscription ??
+        (await self.registration.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey,
+        }));
+
+      const json = subscription.toJSON();
+
+      if (oldEndpoint) {
+        const rotated = await fetch("/api/push/rotate", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            oldEndpoint,
+            oldAuth: oldSubscription?.toJSON?.().keys?.auth,
+            endpoint: json.endpoint,
+            keys: json.keys,
+          }),
+        }).catch(() => null);
+
+        if (rotated?.ok) return;
+      }
+
+      // No old endpoint to match on (or it was already gone) — register the new
+      // subscription the normal way. Needs a session, so it may no-op.
+      await fetch("/api/push/subscribe", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify(json),
+      }).catch(() => null);
+    })(),
   );
 });

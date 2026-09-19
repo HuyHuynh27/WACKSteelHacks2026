@@ -6,6 +6,8 @@
     "skipLibCheck": true,
     "strict": true,
     "noEmit": true,
+    // Tests run on node --experimental-strip-types, which needs real .ts paths.
+    "allowImportingTsExtensions": true,
     "esModuleInterop": true,
     "module": "esnext",
     "moduleResolution": "bundler",

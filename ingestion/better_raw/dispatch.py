@@ -35,8 +35,13 @@ def run() -> dict:
 
     payload = response.json()
     log.info(
-        "Dispatched: %s delivered, %s skipped",
-        payload.get("delivered"),
-        payload.get("skipped"),
+        "Dispatched: %s delivered, %s deferred, %s dropped, %s failed",
+        payload.get("delivered", 0),
+        payload.get("deferred", 0),
+        payload.get("dropped", 0),
+        payload.get("failed", 0),
     )
+    if payload.get("failed"):
+        # Every device rejected these; they stay pending for the next run.
+        log.warning("%s alert(s) could not be delivered to any device.", payload["failed"])
     return payload
