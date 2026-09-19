@@ -66,9 +66,10 @@ export default async function SettingsPage() {
                 user_id: user!.id,
                 enabled: false,
                 min_change_pct: 5,
-                digest: "daily",
+                digest: "instant",
                 quiet_hours_start: 21,
                 quiet_hours_end: 7,
+                digest_sent_at: null,
                 updated_at: new Date().toISOString(),
               }
             }

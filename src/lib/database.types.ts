@@ -103,6 +103,8 @@ export type NotificationPrefs = {
   digest: DigestFrequency;
   quiet_hours_start: number;
   quiet_hours_end: number;
+  /** When the last batched digest went out; null means one is due. */
+  digest_sent_at: string | null;
   updated_at: string;
 };
 
@@ -215,7 +217,7 @@ export type Database = {
         Row: Row<NotificationPrefs>;
         Insert: Insert<
           NotificationPrefs,
-          "enabled" | "min_change_pct" | "digest" | "quiet_hours_start" | "quiet_hours_end" | "updated_at"
+          "enabled" | "min_change_pct" | "digest" | "quiet_hours_start" | "quiet_hours_end" | "digest_sent_at" | "updated_at"
         >;
         Update: Partial<NotificationPrefs>;
         Relationships: [];

@@ -97,6 +97,50 @@ python run.py all
 
 See [`ingestion/README.md`](ingestion/README.md) for the individual steps.
 
+## Notifications
+
+Seven routes under `/api/push`. The VAPID private key lives only in the Next.js
+deployment, so every send goes through here — the Python worker just asks.
+
+| Route          | Auth                | What it does                                       |
+| -------------- | ------------------- | -------------------------------------------------- |
+| `subscribe`    | session             | Stores a device's subscription; flips the opt-in on |
+| `unsubscribe`  | session             | Drops one device; opts out when it was the last     |
+| `test`         | session             | Sends a sample alert to the caller's own devices    |
+| `ack`          | session             | Marks an alert read when its notification is tapped |
+| `rotate`       | knowledge of old endpoint | Re-points a subscription the browser rotated  |
+| `vapid-key`    | public              | The public key, so the service worker can re-subscribe |
+| `dispatch`     | `x-cron-secret`     | Fans pending alerts out to every eligible device    |
+
+### How dispatch decides
+
+The rules live in [`src/lib/notifications.ts`](src/lib/notifications.ts), kept
+free of Supabase and `web-push` so they can be tested on their own — `npm test`.
+Per user, per run:
+
+1. **Not opted in, or no devices left?** Retire the alerts; they will never send.
+2. **Under the account-wide `min_change_pct`?** Retire those. Each material's own
+   `alert_threshold_pct` was already applied upstream by the worker.
+3. **Inside quiet hours?** Leave them pending — the next run picks them up.
+4. **`digest` is `instant`?** One notification per alert.
+5. **`daily` or `weekly`?** Hold until `digest_sent_at` is old enough, then send a
+   single batched notification led by the biggest mover.
+
+An alert is marked delivered only once at least one device *accepted* it. If every
+send fails it stays pending rather than vanishing. Subscriptions that come back
+404/410 are pruned.
+
+### Things that bite
+
+- **Rotation is silent.** Browsers reissue subscriptions whenever they like and
+  nothing tells the server. The service worker's `pushsubscriptionchange` handler
+  posts to `rotate`; without it a device just stops receiving alerts.
+- **iOS needs the Home Screen.** Safari only grants push once the PWA is
+  installed, and only over HTTPS — test on the Vercel URL, not localhost.
+- **Dev skips the service worker.** `ServiceWorkerRegistrar` no-ops in
+  development; use `npm run build && npm start` to exercise push.
+- **Check the keypair before blaming the browser:** `npm run verify:push`.
+
 ## Deploying
 
 Push to GitHub, import the repo on Vercel, and set every variable from
