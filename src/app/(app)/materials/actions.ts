@@ -70,10 +70,7 @@ export async function createMaterial(formData: FormData): Promise<ActionState> {
   };
 }
 
-export async function updateMaterial(
-  _prev: ActionState,
-  formData: FormData,
-): Promise<ActionState> {
+export async function updateMaterial(formData: FormData): Promise<ActionState> {
   const id = String(formData.get("id") ?? "");
   if (!id) return { error: "Missing material id." };
 
@@ -83,38 +80,137 @@ export async function updateMaterial(
   const supabase = await createClient();
   const input = parsed.data;
 
+  // Two fields invalidate the mapping, and both do it silently.
+  //
+  // `price_factor` was derived from the old unit: FRED quotes aluminum per
+  // metric ton and the factor converts that to pounds. Switch the unit to
+  // kilograms and the stored prices stay per-pound while the UI relabels them,
+  // so every BOM cost lands 2.2x out with nothing to show it.
+  //
+  // The series itself was chosen from the old name, and the worker only picks
+  // up materials where `fred_series_id` is null — so a rename would otherwise
+  // keep tracking whatever the previous name matched, forever.
+  //
+  // In both cases: clear the mapping, reset the conversion, and drop the FRED
+  // history that was converted under the old assumptions. The next ingestion
+  // run re-maps and re-backfills. Manually recorded prices are the buyer's own
+  // records and are left alone.
+  const { data: current } = await supabase
+    .from("materials")
+    .select("name, unit")
+    .eq("id", id)
+    .maybeSingle();
+
+  const unitChanged = input.unit != null && current != null && input.unit !== current.unit;
+  const nameChanged = input.name != null && current != null && input.name !== current.name;
+  const remap = unitChanged || nameChanged;
+
+  // Only touch the nullable columns the form actually submitted — otherwise a
+  // field the dialog doesn't render (notes) would be blanked on every save.
+  const clearable = <T,>(field: string, value: T) =>
+    formData.has(field) ? { [field]: value } : {};
+
   const { error } = await supabase
     .from("materials")
     .update({
       ...(input.name != null && { name: input.name }),
       ...(input.unit != null && { unit: input.unit }),
-      category: blankToNull(input.category),
-      sku: blankToNull(input.sku),
-      supplier: blankToNull(input.supplier),
-      notes: blankToNull(input.notes),
+      ...(input.currency != null && { currency: input.currency.toUpperCase() }),
+      ...clearable("category", blankToNull(input.category)),
+      ...clearable("sku", blankToNull(input.sku)),
+      ...clearable("supplier", blankToNull(input.supplier)),
+      ...clearable("notes", blankToNull(input.notes)),
       ...(input.baseline_price !== undefined && { baseline_price: input.baseline_price }),
       ...(input.alert_threshold_pct != null && {
         alert_threshold_pct: input.alert_threshold_pct,
       }),
+      ...(remap && {
+        fred_series_id: null,
+        fred_confidence: null,
+        fred_mapped_at: null,
+        price_factor: 1,
+        price_native_unit: null,
+        price_is_index: false,
+      }),
     })
     .eq("id", id);
 
-  if (error) return { error: error.message };
+  if (error) {
+    // materials_user_name_key
+    if (error.code === "23505") {
+      return { error: `You already track a material called "${input.name}".` };
+    }
+    return { error: error.message };
+  }
+
+  if (remap) {
+    // Prices converted under the old unit would sit in the same series as
+    // prices converted under the new one, which reads as a cliff in the chart
+    // and would trip the alert detector.
+    await supabase.from("price_points").delete().eq("material_id", id).eq("source", "fred");
+  }
 
   revalidatePath("/materials");
   revalidatePath(`/materials/${id}`);
-  return { message: "Saved." };
+  revalidatePath("/dashboard");
+  revalidatePath("/products");
+
+  return {
+    message: remap
+      ? `Saved. ${
+          unitChanged ? "Changing the unit" : "Renaming"
+        } clears the price series — the next ingestion run re-maps it and backfills the history.`
+      : "Saved.",
+  };
 }
 
-export async function deleteMaterial(formData: FormData): Promise<void> {
+/** Names the products whose bill of materials still references a material. */
+async function productsUsing(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  materialId: string,
+): Promise<string[]> {
+  const { data: lines } = await supabase
+    .from("bom_items")
+    .select("product_id")
+    .eq("material_id", materialId);
+
+  const productIds = [...new Set((lines ?? []).map((line) => line.product_id))];
+  if (productIds.length === 0) return [];
+
+  const { data: products } = await supabase
+    .from("products")
+    .select("name")
+    .in("id", productIds);
+
+  return (products ?? []).map((product) => product.name);
+}
+
+export async function deleteMaterial(formData: FormData): Promise<ActionState> {
   const id = String(formData.get("id") ?? "");
-  if (!id) return;
+  if (!id) return { error: "Missing material id." };
 
   const supabase = await createClient();
-  await supabase.from("materials").delete().eq("id", id);
+  const { error } = await supabase.from("materials").delete().eq("id", id);
+
+  if (error) {
+    // bom_items.material_id is ON DELETE RESTRICT — a material can't vanish
+    // out from under a product that still costs itself from it.
+    if (error.code === "23503") {
+      const names = await productsUsing(supabase, id);
+      return {
+        error: names.length
+          ? `Still used by ${names.join(", ")}. Remove it from ${
+              names.length === 1 ? "that product" : "those products"
+            } first.`
+          : "This material is still used by a product. Remove it there first.",
+      };
+    }
+    return { error: error.message };
+  }
 
   revalidatePath("/materials");
   revalidatePath("/dashboard");
+  return { message: "Material deleted." };
 }
 
 export async function toggleTracking(formData: FormData): Promise<void> {
