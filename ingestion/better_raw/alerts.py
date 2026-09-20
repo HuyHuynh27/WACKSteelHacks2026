@@ -16,6 +16,12 @@ tool loop by hand against DuckDuckGo (no API key, no card).
 Reasoning is on for research (it has to weigh sources) and off for formatting
 (it only has to fill in a schema, and thinking tokens count against the same
 output budget as the JSON).
+
+Citations are verified rather than trusted. The model will emit a
+confident-looking URL that maps to nothing -- a bracketed reference marker from
+its training, or a placeholder domain -- and a wrong link in a notification is
+worse than no link. `research()` records every href the search returned and
+`_verify_sources()` nulls anything outside that set.
 """
 
 from __future__ import annotations
@@ -23,8 +29,10 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import date, timedelta
+from urllib.parse import parse_qs, urlsplit
 
 from ddgs import DDGS
 from pydantic import BaseModel, Field
@@ -132,8 +140,11 @@ e.g. "Aluminum +6.2% this week".
 - body: one or two sentences under 180 characters naming the drivers and what it \
 means for their costs.
 - drivers: one to four specific causes. Each needs a short label and a concrete \
-detail. Only include a driver the research notes support. Set source to the URL \
-the notes credit, or null.
+detail. Only include a driver the research notes support.
+- source: copy one URL verbatim from the list of sources given to you, or use \
+null. Never write a URL that is not in that list, never invent a placeholder \
+domain, and never put a reference marker like [1] or a bracketed citation in \
+this field. Null is always better than a guess.
 
 If the research notes do not explain the move, say the move is unexplained in \
 the body and return a single driver labelled "Cause unclear".
@@ -143,15 +154,25 @@ Output a single JSON object and nothing else.
 
 
 class Driver(BaseModel):
-    driver: str = Field(description="Short label, e.g. 'Smelter outages'.")
-    detail: str = Field(description="One concrete clause explaining it.")
+    driver: str = Field(min_length=1, description="Short label, e.g. 'Smelter outages'.")
+    detail: str = Field(min_length=1, description="One concrete clause explaining it.")
     source: str | None = Field(default=None, description="Source URL, if known.")
 
 
 class AlertCopy(BaseModel):
-    headline: str = Field(max_length=90)
-    body: str = Field(max_length=300)
-    drivers: list[Driver]
+    # min_length guards the one malformed shape the endpoint might still let
+    # through: a schema-valid but entirely empty notification.
+    headline: str = Field(min_length=1, max_length=90)
+    body: str = Field(min_length=1, max_length=300)
+    drivers: list[Driver] = Field(min_length=1)
+
+
+@dataclass(frozen=True)
+class Research:
+    """What the research pass produced, and which URLs it actually saw."""
+
+    notes: str
+    sources: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -202,8 +223,38 @@ def detect_move(material: dict, window_days: int) -> Move | None:
     )
 
 
-def _search(query: str) -> str:
-    """Run one web search and format the hits for the model."""
+def _unwrap(url: str) -> str:
+    """DuckDuckGo hands back redirect wrappers; follow them to the real target."""
+    split = urlsplit(url)
+    if split.netloc.endswith("duckduckgo.com") and split.path.startswith("/l/"):
+        target = parse_qs(split.query).get("uddg")
+        if target:
+            return target[0]
+    return url
+
+
+def _url_key(url: str) -> tuple[str, str] | None:
+    """(host, path) for comparison, ignoring scheme, www, query and fragment.
+
+    Compared on equality rather than prefix on purpose. A prefix match accepts
+    a bare origin the model never saw -- every Reuters URL starts with
+    reuters.com -- and collides on paths like /article/12 against /article/123.
+    """
+    try:
+        split = urlsplit(_unwrap(url.strip()))
+    except ValueError:
+        return None
+
+    if split.scheme not in ("http", "https") or not split.netloc:
+        return None
+
+    host = split.netloc.lower().removeprefix("www.")
+    path = split.path.rstrip("/").lower()
+    return host, path
+
+
+def _search(query: str) -> tuple[str, list[str]]:
+    """Run one web search. Returns the formatted hits and the URLs seen."""
     try:
         with DDGS() as ddgs:
             results = list(ddgs.text(query, max_results=SEARCH_RESULTS))
@@ -211,23 +262,29 @@ def _search(query: str) -> str:
         # A flaky scrape shouldn't kill the alert; the model is told to say the
         # move is unexplained when it has nothing to go on.
         log.warning("Search failed for %r", query, exc_info=True)
-        return "Search failed."
+        return "Search failed.", []
 
-    lines = [
-        "- {}: {} ({})".format(
-            hit.get("title", "untitled"),
-            (hit.get("body") or "")[:SNIPPET_CHARS],
-            hit.get("href", ""),
+    lines: list[str] = []
+    urls: list[str] = []
+    for hit in results:
+        url = _unwrap((hit.get("href") or "").strip())
+        lines.append(
+            "- {}: {} ({})".format(
+                hit.get("title", "untitled"),
+                (hit.get("body") or "")[:SNIPPET_CHARS],
+                url,
+            )
         )
-        for hit in results
-    ]
+        if url:
+            urls.append(url)
+
     if not lines:
-        return "No results found."
+        return "No results found.", []
     log.debug("Got %d result(s) for %r", len(lines), query)
-    return "\n".join(lines)
+    return "\n".join(lines), urls
 
 
-def research(move: Move) -> str:
+def research(move: Move) -> Research:
     """Free-text notes on what drove the move, gathered with web search."""
     material = move.material
     prompt = (
@@ -243,6 +300,12 @@ def research(move: Move) -> str:
         {"role": "system", "content": RESEARCH_SYSTEM},
         {"role": "user", "content": prompt},
     ]
+    # Every URL the search actually returned. Anything the model cites that is
+    # not in here did not come from a real result.
+    seen: list[str] = []
+
+    def collected() -> tuple[str, ...]:
+        return tuple(dict.fromkeys(seen))
 
     for turn in range(MAX_SEARCH_TURNS):
         # On the last turn, drop the tool so the model has to write up.
@@ -262,7 +325,13 @@ def research(move: Move) -> str:
 
         # No tool call means the model is done searching and has written up.
         if not getattr(msg, "tool_calls", None):
-            return _visible_text(msg)
+            return Research(_visible_text(msg), collected())
+
+        # Some endpoints emit tool_calls even when no tool was offered. Keep
+        # whatever prose came with them rather than discarding the whole pass.
+        if not use_tools:
+            log.info("Tool call on the final turn for %r; using its text", material["name"])
+            return Research(_visible_text(msg), collected())
 
         messages.append(
             {
@@ -278,15 +347,17 @@ def research(move: Move) -> str:
                 args = {}
             query = args.get("query") or material["name"]
             log.debug("Searching: %r", query)
+            summary, urls = _search(query)
+            seen.extend(urls)
             messages.append(
                 {
                     "role": "tool",
                     "tool_call_id": tool_call.id,
-                    "content": _search(query),
+                    "content": summary,
                 }
             )
 
-    return ""
+    return Research("", collected())
 
 
 def _visible_text(msg) -> str:
@@ -297,14 +368,50 @@ def _visible_text(msg) -> str:
     return text
 
 
-def write_copy(move: Move, notes: str) -> AlertCopy:
+def _verify_sources(copy: AlertCopy, allowed: Collection[str]) -> AlertCopy:
+    """Null any source the search did not actually return."""
+    lookup: dict[tuple[str, str], str] = {}
+    for url in allowed:
+        key = _url_key(url)
+        if key is not None:
+            lookup.setdefault(key, _unwrap(url.strip()))
+
+    drivers: list[Driver] = []
+    for driver in copy.drivers:
+        source = driver.source
+        if source:
+            key = _url_key(source)
+            match = lookup.get(key) if key is not None else None
+            if match is None:
+                log.info(
+                    "Dropping unverified source %r on driver %r",
+                    source,
+                    driver.driver,
+                )
+                source = None
+            else:
+                source = match
+        drivers.append(
+            Driver(driver=driver.driver, detail=driver.detail, source=source)
+        )
+
+    return AlertCopy(headline=copy.headline, body=copy.body, drivers=drivers)
+
+
+def write_copy(move: Move, research_result: Research) -> AlertCopy:
     """Turn research notes into a schema-valid headline, body and drivers."""
     material = move.material
+    notes = research_result.notes
+    source_list = (
+        "\n".join(f"- {url}" for url in research_result.sources)
+        or "(none -- use null for every source)"
+    )
     prompt = (
         f"Material: {material['name']}\n"
         f"Move: {move.pct_change:+.1f}% over {move.window_days} days "
         f"({move.price_before:.4f} -> {move.price_after:.4f} per {material['unit']})\n\n"
         f"Research notes:\n{notes or '(no research available)'}\n\n"
+        f"Sources you may cite, verbatim or not at all:\n{source_list}\n\n"
         "Respond with ONLY a JSON object matching this schema. No prose, no "
         f"markdown fences.\n{json.dumps(ALERT_COPY_SCHEMA)}"
     )
@@ -334,7 +441,10 @@ def write_copy(move: Move, notes: str) -> AlertCopy:
     try:
         response = client().chat.completions.create(**kwargs)
     except Exception:
-        log.warning("response_format rejected; retrying without it", exc_info=True)
+        log.warning(
+            "Structured call failed (possibly response_format); retrying without it",
+            exc_info=True,
+        )
         kwargs.pop("response_format")
         response = client().chat.completions.create(**kwargs)
 
@@ -342,7 +452,7 @@ def write_copy(move: Move, notes: str) -> AlertCopy:
     content = _visible_text(choice.message)
     copy = _parse_copy(content)
     if copy is not None:
-        return copy
+        return _verify_sources(copy, research_result.sources)
 
     log.warning(
         "Invalid copy JSON for %r (finish_reason=%s); asking for a repair",
@@ -372,7 +482,7 @@ def write_copy(move: Move, notes: str) -> AlertCopy:
     if copy is None:
         log.debug("Raw repair response was: %r", repaired[:2000])
         raise RuntimeError(f"No structured copy returned for {material['name']!r}")
-    return copy
+    return _verify_sources(copy, research_result.sources)
 
 
 def _parse_copy(raw: str) -> AlertCopy | None:
@@ -429,9 +539,14 @@ def run() -> int:
                 break
 
             try:
-                notes = research(move)
-                log.debug("Research notes (%d chars): %s", len(notes), notes[:1000])
-                copy = write_copy(move, notes)
+                found = research(move)
+                log.debug(
+                    "Research notes (%d chars, %d source(s)): %s",
+                    len(found.notes),
+                    len(found.sources),
+                    found.notes[:1000],
+                )
+                copy = write_copy(move, found)
             except Exception:
                 log.exception("Copywriting failed for %r", material["name"])
                 break
