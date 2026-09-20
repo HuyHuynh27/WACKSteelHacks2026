@@ -25,7 +25,21 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
-const UNITS = ["kg", "lb", "metric ton", "short ton", "L", "gal", "m", "ft", "m²", "unit"];
+const UNITS = [
+  "lb",
+  "kg",
+  "metric ton",
+  "short ton",
+  "g",
+  "oz",
+  "gal",
+  "L",
+  "bbl",
+  "therm",
+  "MMBtu",
+  "board foot",
+  "MBF",
+];
 
 /** The editable slice of a material — everything the dialog can change. */
 export type MaterialInit = {
@@ -243,8 +257,9 @@ export function EditMaterialDialog({
         <DialogHeader>
           <DialogTitle>Edit {material.name}</DialogTitle>
           <DialogDescription>
-            Renaming a material re-runs the mapping on the next ingestion run;
-            its recorded price history is kept either way.
+            Changing the name or the unit of purchase clears the matched price
+            series. The next ingestion run re-maps it and backfills the history.
+            Prices you recorded yourself are kept.
           </DialogDescription>
         </DialogHeader>
 

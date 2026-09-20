@@ -97,7 +97,11 @@ export default async function MaterialsPage() {
                       {material.name}
                     </Link>
                     <p className="text-xs text-muted-foreground">
-                      {[material.category, material.supplier, `per ${material.unit}`]
+                      {[
+                        material.category,
+                        material.supplier,
+                        material.price_is_index ? "index" : `per ${material.unit}`,
+                      ]
                         .filter(Boolean)
                         .join(" · ")}
                     </p>
@@ -117,10 +121,24 @@ export default async function MaterialsPage() {
                   </TableCell>
 
                   <TableCell className="text-right tabular-nums">
-                    {formatCurrency(
-                      material.stats?.latest_price ?? material.baseline_price,
-                      material.currency,
-                      4,
+                    {/* An index has no currency: $286.6330 reads as a price per
+                        board foot, which is the confusion the unit handling
+                        elsewhere exists to prevent. */}
+                    {material.price_is_index ? (
+                      material.stats?.latest_price != null ? (
+                        <>
+                          {Number(material.stats.latest_price).toFixed(1)}{" "}
+                          <span className="text-xs text-muted-foreground">idx</span>
+                        </>
+                      ) : (
+                        <span className="text-muted-foreground">—</span>
+                      )
+                    ) : (
+                      formatCurrency(
+                        material.stats?.latest_price ?? material.baseline_price,
+                        material.currency,
+                        4,
+                      )
                     )}
                   </TableCell>
                   <TableCell className="text-right">
