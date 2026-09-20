@@ -1,0 +1,148 @@
+  Better RAW — system rundown
+
+  One-liner for the judges: a PWA that tracks what a small manufacturer's raw materials cost, rolls those costs up through the bill of materials, and pushes a plain-English alert when prices move — including
+  why they moved, with verified sources.
+
+  There are six systems. Two run on a schedule, four run in the browser/server.
+
+  ---
+
+  1. Data model — Postgres on Supabase
+
+  supabase/migrations/ · 4 migrations
+
+  Nine tables, two views, RLS on everything.
+
+  ┌────────────────────────────────────────┬────────────────────────────────────────────────────────────────────────────────────────────────────┐
+  │                 Table                  │                                               Holds                                                │
+  ├────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ profiles                               │ one row per business account (auto-created on signup by a trigger)                                 │
+  ├────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ fred_series                            │ catalogue of ~30 public price series the mapper picks from (0002)                                  │
+  ├────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ materials                              │ what a shop buys: name, unit, supplier, SKU, baseline price, alert threshold                       │
+  ├────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ price_points                           │ the time series, unique on (material_id, observed_on, source) — source is fred | manual | supplier │
+  ├────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ products + bom_items                   │ bill of materials: a product is a bag of (material, quantity)                                      │
+  ├────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ push_subscriptions, notification_prefs │ one row per device; one prefs row per user                                                         │
+  ├────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ alerts                                 │ a detected move + LLM-written headline/body/drivers JSONB                                          │
+  └────────────────────────────────────────┴────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+  Two things worth presenting here:
+
+  - The cost roll-up is a SQL view, not application code. product_costs (0001_init.sql:203) joins BOM quantities against material_price_stats and emits unit_cost and unit_cost_30d_ago in one query. Prices
+    change → costs recalculate, nothing to recompute.
+  - Multi-tenancy is enforced by the database, not the app. Every table has a user_id = auth.uid() RLS policy; price_points and bom_items inherit ownership through their parent. Both views use
+    security_invoker = true so RLS follows through the view. This is why /api/query can look up any material id and safely return 404 for someone else's.
+
+  ---
+
+  2. Ingestion worker — Python on GitHub Actions
+
+  ingestion/ · runs 11:20 UTC weekdays, no server to host
+
+  Four steps, python run.py all, each independently re-runnable:
+
+  map  →  sync  →  alerts  →  dispatch
+
+  map (mapper.py) — the classification problem. A shop types "6061 aluminium extrusion"; the tracked series is PALUMUSDM. The LLM picks from the catalogue and returns a confidence; below 0.45 the material is
+  left unmapped rather than tracked against the wrong index. If nothing in the catalogue fits, the model proposes a FRED search phrase and the top non-annual result is adopted into the catalogue.
+
+  sync (sync.py + units.py) — pulls FRED observations incrementally (resumes from the newest stored row; a new material backfills 6 years). The unit conversion is the quietly important part: FRED quotes
+  aluminum in USD/metric ton, the shop buys by the pound — off by ~2200×, and the error is invisible because it just looks like a plausible wrong number in the BOM. So units.py is a hard-coded lookup table
+  across mass/volume/energy/lumber, deliberately kept away from the model. Index series (PPI) are flagged price_is_index so nothing multiplies an index level into a dollar cost.
+
+  alerts (alerts.py) — detects a move past the material's threshold over a 7d and 30d window (longest first, so a 30-day drift isn't double-reported), with a 5-day per-material cooldown. Then two LLM calls.
+
+  dispatch (dispatch.py) — POSTs the app's /api/push/dispatch with the shared cron secret. It doesn't send pushes itself because the VAPID private key only lives in the Next.js deployment.
+
+  ---
+
+  3. The LLM layer — NVIDIA Nemotron
+
+  ingestion/better_raw/llm.py, src/lib/llm.ts
+
+  ⚠️  The README is stale here — it says Claude API throughout. The code was migrated to nvidia/nemotron-3-super-120b-a12b over NVIDIA's OpenAI-compatible endpoint for the Nemotron hackathon track. Fix this
+  before you present; a judge reading the README will ask.
+
+  Three design decisions worth saying out loud:
+
+  1. Reasoning is toggled per task. REASONING (budget 8192) for mapping and research, where there's a judgement call. NO_REASONING for the copywriting and the Q&A, because thinking tokens come out of the
+     same output budget as the answer — so on a pure formatting job they cost you the JSON.
+  2. The web search backend is yours. Anthropic's hosted web_search server tool has no Nemotron equivalent, so research() runs the OpenAI tool-calling loop by hand against DuckDuckGo (ddgs, no API key) — max
+     4 turns, and the tool is withdrawn on the final turn to force a write-up.
+  3. Citations are verified, not trusted (alerts.py:371). The model will emit a confident-looking URL that maps to nothing — a [1] marker from training, or a placeholder domain. research() records every href
+     the search actually returned; _verify_sources() nulls anything outside that set, comparing on (host, path) equality rather than prefix (a prefix match would accept a bare reuters.com the model never
+     saw). This is why the material page can render driver.source as a live link without checking anything.
+
+  Hardening throughout: hand-inlined flat JSON schemas (guided decoding chokes on Pydantic's $defs/$ref), response_format treated as best-effort with a retry that drops it, a repair round-trip on invalid
+  JSON, and <think> stripping because some NIM deployments inline reasoning into content even with thinking off.
+
+  ---
+
+  4. Push notifications — the most-engineered part
+
+  src/app/api/push/* (7 routes), src/lib/notifications.ts, public/sw.js
+
+  The delivery rules are pure functions (notifications.ts) — no Supabase, no web-push — so they're unit-tested on their own. That's your 16 passing tests. Per user, per run:
+
+  1. Not opted in / no devices → drop (retire the alerts, they'll never send)
+  2. Under the account-wide min_change_pct floor → drop (the per-material threshold was already applied upstream by the worker)
+  3. Inside quiet hours → defer (stays pending, next run picks it up)
+  4. instant → one notification per alert
+  5. daily/weekly → hold until digest_sent_at is old enough, then one batched notification led by the biggest mover
+
+  The dispatch route (dispatch/route.ts) uses timingSafeEqual on the cron secret, groups alerts per user, and only marks an alert delivered once at least one device accepted it — if every send fails it stays
+  pending rather than vanishing. 404/410 subscriptions get pruned.
+
+  The pushsubscriptionchange handler is the detail nobody expects (sw.js:118). Browsers rotate subscriptions on their own schedule and tell the server nothing; without this, a device silently stops receiving
+  alerts forever. The SW re-subscribes and posts to /api/push/rotate, which is authed on knowledge of the old endpoint — it has to work without a session.
+
+  Tapping a notification fires /api/push/ack to mark the alert read, then focuses an existing window and navigates it rather than piling up tabs.
+
+  ---
+
+  5. The web app — Next.js 16 App Router
+
+  src/app/
+
+  - Auth: Supabase email/password. src/proxy.ts (Next 16 renamed middleware → proxy) refreshes the session cookie on every request and bounces anonymous users to /login — except /api/*, which
+    self-authenticates and must return real status codes, not a 307.
+  - Pages: dashboard (KPI tiles + movers chart + roll-up), materials list + detail, products, alerts, settings. All React Server Components reading through src/lib/queries.ts; writes go through Server
+    Actions with Zod validation.
+  - PWA: manifest, generated icons, network-first service worker with an offline shell. SW registration no-ops in dev — you need npm run build && npm start to demo push.
+  - Charts: Recharts, with colour tokens in globals.css under .viz-root validated for colour-vision deficiency and contrast in both themes.
+
+  ---
+
+  6. RAG Q&A — POST /api/query
+
+  src/lib/rag/context.ts, src/lib/rag/synthesize.ts
+
+  Ask a question about a material; get a grounded answer plus citations.
+
+  The interesting claim: there is no vector store, and that's the point. The expensive work — searching, weighing sources, writing the explanation — already happened once in the ingestion worker and is
+  sitting on the alert row with its verified drivers. Retrieval only has to pick which of a material's ~10 alerts are relevant, so it's keyword overlap with recency as a tiebreaker. Nothing to embed, no
+  index to keep in sync.
+
+  Synthesis is tightly fenced: ground every claim in the price history or the alerts, say so plainly if they don't cover it, never convert units, label every figure an estimate, and no buy/hold/hedge 
+  recommendations — information to decide with, not advice.
+
+  ---
+
+  Four things to fix before you present
+
+  1. The GitHub Action is broken. .github/workflows/ingest.yml still passes ANTHROPIC_API_KEY/ANTHROPIC_MODEL and never sets NVIDIA_API_KEY. config.py does _require("NVIDIA_API_KEY"), so every scheduled run
+     exits with a ConfigError before doing anything. One-line fix, but if a judge clicks the Actions tab it's all red.
+  2. /api/query has no UI. Nothing in src/ calls it — I grepped. The whole RAG system is only reachable by curl. Either build a small ask-box on the material detail page or demo it from the terminal, but
+     don't let it go unmentioned; it's some of your best work.
+  3. README says Claude, code says Nemotron. Eight or nine references across the root README and ingestion/README.md. For a Nemotron-track submission this reads backwards.
+  4. No VAPID keys in .env.local. requireEnv("VAPID_PRIVATE_KEY") throws, so push is dead locally right now. Run npm run gen:vapid, and check the Vercel env has them too.
+
+  Minor: pydantic is imported by mapper.py/alerts.py but isn't in requirements.txt — it works today only because supabase pulls it in transitively.
+
+  Also worth knowing: ingestion/demo_data.py dumps and restores a known-good run to JSON. Ingestion depends on Nemotron, FRED and a web scraper, none of which are guaranteed to behave on stage. Run python 
+  demo_data.py dump while everything works, and you can restore the database in seconds if the live demo goes sideways.
