@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { ArrowDownRight, ArrowRight, ArrowUpRight, CircleDashed } from "lucide-react";
 
+import { MaterialActions } from "@/components/material-actions";
 import { AddMaterialDialog } from "@/components/material-form";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -132,13 +133,16 @@ export default async function MaterialsPage() {
                     {formatDate(material.stats?.latest_observed_on)}
                   </TableCell>
                   <TableCell>
-                    <Button
-                      render={<Link href={`/materials/${material.id}`} />}
-                      variant="ghost"
-                      size="sm"
-                    >
-                      Open
-                    </Button>
+                    <div className="flex items-center justify-end gap-1">
+                      <Button
+                        render={<Link href={`/materials/${material.id}`} />}
+                        variant="ghost"
+                        size="sm"
+                      >
+                        Open
+                      </Button>
+                      <MaterialActions material={material} />
+                    </div>
                   </TableCell>
                 </TableRow>
               ))}

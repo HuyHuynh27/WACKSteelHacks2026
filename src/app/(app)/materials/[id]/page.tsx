@@ -2,6 +2,7 @@ import { notFound } from "next/navigation";
 
 import { PriceChart } from "@/components/charts/price-chart";
 import { ManualPriceForm } from "@/components/manual-price-form";
+import { MaterialActions } from "@/components/material-actions";
 import { StatTile } from "@/components/stat-tile";
 import { TrackedVia } from "@/components/tracked-via";
 import { Badge } from "@/components/ui/badge";
@@ -75,6 +76,9 @@ export default async function MaterialPage({
             <Badge variant="outline">unmapped</Badge>
           )}
           {!material.tracking && <Badge variant="outline">paused</Badge>}
+          <div className="ml-auto">
+            <MaterialActions material={material} redirectOnDelete />
+          </div>
         </div>
         <p className="text-sm text-muted-foreground">
           {[

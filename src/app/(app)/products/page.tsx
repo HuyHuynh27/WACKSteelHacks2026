@@ -1,3 +1,4 @@
+import { ProductActions } from "@/components/product-actions";
 import { ProductForm } from "@/components/product-form";
 import {
   Card,
@@ -27,15 +28,20 @@ export default async function ProductsPage() {
   ]);
 
   const supabase = await createClient();
-  const { data: bom } = await supabase
-    .from("bom_items")
-    .select("id, product_id, material_id, quantity, unit");
+  // product_costs is an aggregate view and has no sku, so the edit dialog
+  // reads the products table for it.
+  const [{ data: bom }, { data: rows }] = await Promise.all([
+    supabase.from("bom_items").select("id, product_id, material_id, quantity, unit"),
+    supabase.from("products").select("id, sku"),
+  ]);
 
   const bomByProduct = new Map<string, NonNullable<typeof bom>>();
   for (const item of bom ?? []) {
     bomByProduct.set(item.product_id, [...(bomByProduct.get(item.product_id) ?? []), item]);
   }
   const materialsById = new Map(materials.map((m) => [m.id, m]));
+  const skuById = new Map((rows ?? []).map((row) => [row.id, row.sku]));
+  const materialOptions = materials.map((m) => ({ id: m.id, name: m.name, unit: m.unit }));
 
   return (
     <div className="space-y-6">
@@ -47,7 +53,7 @@ export default async function ProductsPage() {
             market moves.
           </p>
         </div>
-        <ProductForm materials={materials.map((m) => ({ id: m.id, name: m.name, unit: m.unit }))} />
+        <ProductForm materials={materialOptions} />
       </header>
 
       {costs.length === 0 ? (
@@ -85,13 +91,28 @@ export default async function ProductsPage() {
                           ` · ${product.unpriced_material_count} unpriced`}
                       </CardDescription>
                     </div>
-                    <div className="text-right">
-                      <p className="text-xl font-semibold tabular-nums">
-                        {formatCurrency(now != null ? Number(now) : null, "USD", 4)}
-                      </p>
-                      <p className="text-xs text-muted-foreground">
-                        per unit{delta != null && ` · ${formatPercent(delta)} in 30d`}
-                      </p>
+                    <div className="flex items-start gap-1">
+                      <div className="text-right">
+                        <p className="text-xl font-semibold tabular-nums">
+                          {formatCurrency(now != null ? Number(now) : null, "USD", 4)}
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          per unit{delta != null && ` · ${formatPercent(delta)} in 30d`}
+                        </p>
+                      </div>
+                      <ProductActions
+                        materials={materialOptions}
+                        product={{
+                          id: product.product_id,
+                          name: product.name,
+                          sku: skuById.get(product.product_id) ?? null,
+                          units_per_batch: Number(product.units_per_batch),
+                          lines: items.map((item) => ({
+                            materialId: item.material_id,
+                            quantity: String(Number(item.quantity)),
+                          })),
+                        }}
+                      />
                     </div>
                   </div>
                 </CardHeader>
