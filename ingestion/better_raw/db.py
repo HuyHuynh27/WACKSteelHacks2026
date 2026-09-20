@@ -6,6 +6,7 @@ see every business's materials. Keep that key out of anything user-facing.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from typing import Any
 
@@ -40,15 +41,22 @@ def fetch_unmapped_materials(limit: int = 50) -> list[dict[str, Any]]:
 
 
 def set_material_series(
-    material_id: str, series_id: str | None, confidence: float | None
+    material_id: str,
+    series_id: str | None,
+    confidence: float | None,
+    price_factor: float = 1.0,
+    price_native_unit: str | None = None,
+    price_is_index: bool = False,
 ) -> None:
-    from datetime import datetime, timezone
-
+    """Record the mapping plus how to get from the series' unit to the shop's."""
     client().table("materials").update(
         {
             "fred_series_id": series_id,
             "fred_confidence": confidence,
             "fred_mapped_at": datetime.now(timezone.utc).isoformat(),
+            "price_factor": price_factor,
+            "price_native_unit": price_native_unit,
+            "price_is_index": price_is_index,
         }
     ).eq("id", material_id).execute()
 
@@ -65,7 +73,8 @@ def fetch_tracked_materials() -> list[dict[str, Any]]:
         client()
         .table("materials")
         .select(
-            "id, user_id, name, unit, currency, fred_series_id, alert_threshold_pct"
+            "id, user_id, name, unit, currency, fred_series_id, "
+            "alert_threshold_pct, price_factor, price_native_unit, price_is_index"
         )
         .not_.is_("fred_series_id", "null")
         .eq("tracking", True)
@@ -115,8 +124,6 @@ def fetch_price_history(material_id: str, limit: int = 120) -> list[dict[str, An
 
 def recent_alert_exists(material_id: str, window_days: int, within_days: int) -> bool:
     """Guards against re-alerting on the same move every run."""
-    from datetime import datetime, timedelta, timezone
-
     cutoff = (datetime.now(timezone.utc) - timedelta(days=within_days)).isoformat()
     response = (
         client()

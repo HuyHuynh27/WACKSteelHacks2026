@@ -12,6 +12,7 @@
 
 # testing
 /coverage
+ingestion/demo_data.json
 
 # next.js
 /.next/

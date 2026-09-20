@@ -41,7 +41,10 @@ def main() -> int:
         datefmt="%H:%M:%S",
     )
     # httpx logs every request at INFO, which drowns out our own output.
-    logging.getLogger("httpx").setLevel(logging.WARNING)
+    for noisy in ("httpx", "httpx2", "httpcore", "httpcore2", "hpack", "h2",
+              "openai._base_client", "primp", "hickory_net", "hickory_resolver",
+              "cookie_store"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
     log = logging.getLogger("better_raw")
 
     names = list(STEPS) if args.step == "all" else [args.step]

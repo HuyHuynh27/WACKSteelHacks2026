@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 import { PriceChart } from "@/components/charts/price-chart";
 import { ManualPriceForm } from "@/components/manual-price-form";
 import { StatTile } from "@/components/stat-tile";
+import { TrackedVia } from "@/components/tracked-via";
 import { Badge } from "@/components/ui/badge";
 import {
   Card,
@@ -52,6 +53,15 @@ export default async function MaterialPage({
       .limit(5),
   ]);
 
+  // An index has no currency. Formatting 286.633 as $286.6330 reads as a price
+  // per board foot, which is what the unit conversion work was meant to stop.
+  const isIndex = material.price_is_index;
+  const formatLevel = (value: number | null | undefined) => {
+    if (value === null || value === undefined) return "—";
+    if (!isIndex) return formatCurrency(value, material.currency, 4);
+    return `${Number(value).toFixed(1)} index pts`;
+  };
+
   return (
     <div className="space-y-6">
       <header className="space-y-2">
@@ -71,7 +81,7 @@ export default async function MaterialPage({
             material.category,
             material.supplier,
             material.sku,
-            `priced per ${material.unit}`,
+            isIndex ? "tracked as an index" : `priced per ${material.unit}`,
             `alerts at ±${Number(material.alert_threshold_pct).toFixed(1)}%`,
           ]
             .filter(Boolean)
@@ -81,19 +91,19 @@ export default async function MaterialPage({
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <StatTile
-          label="Latest tracked price"
-          value={formatCurrency(stats?.latest_price, material.currency, 4)}
+          label={isIndex ? "Latest index level" : "Latest tracked price"}
+          value={formatLevel(stats?.latest_price)}
           hint={stats?.latest_observed_on ? `as of ${formatDate(stats.latest_observed_on)}` : undefined}
         />
         <StatTile
           label="Change, 7 days"
-          value={formatCurrency(stats?.price_7d_ago, material.currency, 4)}
+          value={formatLevel(stats?.price_7d_ago)}
           delta={stats?.change_7d_pct ?? null}
           deltaLabel="vs a week ago"
         />
         <StatTile
           label="Change, 30 days"
-          value={formatCurrency(stats?.price_30d_ago, material.currency, 4)}
+          value={formatLevel(stats?.price_30d_ago)}
           delta={stats?.change_30d_pct ?? null}
           deltaLabel="vs a month ago"
         />
@@ -119,6 +129,14 @@ export default async function MaterialPage({
                 }`
               : "Not yet mapped to a public price series."}
           </CardDescription>
+          <TrackedVia
+            materialName={material.name}
+            seriesTitle={series?.title ?? null}
+            confidence={
+              material.fred_confidence != null ? Number(material.fred_confidence) : null
+            }
+            isIndex={isIndex}
+          />
         </CardHeader>
         <CardContent>
           <PriceChart
@@ -128,7 +146,12 @@ export default async function MaterialPage({
             }))}
             currency={material.currency}
             unit={material.unit}
-            baseline={material.baseline_price != null ? Number(material.baseline_price) : null}
+            isIndex={isIndex}
+            baseline={
+              !isIndex && material.baseline_price != null
+                ? Number(material.baseline_price)
+                : null
+            }
           />
         </CardContent>
       </Card>
@@ -167,6 +190,22 @@ export default async function MaterialPage({
                       <li key={index}>
                         <span className="font-medium text-foreground">{driver.driver}</span>{" "}
                         — {driver.detail}
+                        {/* Only sources the search actually returned survive
+                            verification in the worker, so anything here is
+                            safe to link. */}
+                        {driver.source && (
+                          <>
+                            {" "}
+                            <a
+                              href={driver.source}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="underline underline-offset-2 hover:text-foreground"
+                            >
+                              source
+                            </a>
+                          </>
+                        )}
                       </li>
                     ))}
                   </ul>
