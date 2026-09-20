@@ -9,9 +9,9 @@ export const metadata = { title: "Sign in — Better RAW" };
 export default async function LoginPage({
   searchParams,
 }: {
-  searchParams: Promise<{ next?: string; error?: string }>;
+  searchParams: Promise<{ next?: string; error?: string; mode?: string }>;
 }) {
-  const { next, error } = await searchParams;
+  const { next, error, mode } = await searchParams;
 
   const supabase = await createClient();
   const {
@@ -27,7 +27,11 @@ export default async function LoginPage({
       <p className="max-w-sm text-center text-sm text-muted-foreground">
         Track what your raw materials cost, what they will cost, and why.
       </p>
-      <LoginForm next={next} initialError={error} />
+      <LoginForm
+        next={next}
+        initialError={error}
+        initialMode={mode === "signup" ? "signup" : "signin"}
+      />
     </main>
   );
 }
