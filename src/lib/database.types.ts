@@ -54,6 +54,9 @@ export type Material = {
   alert_threshold_pct: number;
   created_at: string;
   updated_at: string;
+  price_factor: number;
+  price_native_unit: string | null;
+  price_is_index: boolean;
 };
 
 export type PricePoint = {
@@ -185,6 +188,9 @@ export type Database = {
           | "alert_threshold_pct"
           | "created_at"
           | "updated_at"
+          | "price_factor"
+          | "price_native_unit"
+          | "price_is_index"
         >;
         Update: Partial<Material>;
         Relationships: [];

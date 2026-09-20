@@ -86,3 +86,17 @@ export async function getNotificationPrefs() {
     .maybeSingle();
   return data;
 }
+
+export async function getAlertsForMaterial(
+  materialId: string,
+  limit = 10
+): Promise<Alert[]> {
+  const supabase = await createClient();
+  const { data } = await supabase
+    .from("alerts")
+    .select("*")
+    .eq("material_id", materialId)
+    .order("created_at", { ascending: false })
+    .limit(limit);
+  return data ?? [];
+}

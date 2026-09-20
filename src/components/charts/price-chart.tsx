@@ -33,16 +33,31 @@ function tickDate(value: string) {
   });
 }
 
+/**
+ * A PPI series is quoted in index points, not money. Rendering 286.633 as
+ * $286.6330 reads as a price per board foot, which is exactly the confusion
+ * the unit handling elsewhere is meant to prevent.
+ */
+function formatLevel(
+  value: number,
+  { isIndex, currency, decimals }: { isIndex: boolean; currency: string; decimals: number },
+) {
+  if (!isIndex) return formatCurrency(value, currency, decimals);
+  return value.toFixed(Math.min(decimals, 1));
+}
+
 function ChartTooltip({
   active,
   payload,
   currency,
   unit,
+  isIndex,
 }: {
   active?: boolean;
   payload?: { payload: PricePoint }[];
   currency: string;
   unit: string;
+  isIndex: boolean;
 }) {
   if (!active || !payload?.length) return null;
   const point = payload[0].payload;
@@ -63,8 +78,10 @@ function ChartTooltip({
           style={{ background: "var(--viz-series-1)" }}
           aria-hidden
         />
-        {formatCurrency(point.price, currency, 4)}
-        <span className="font-normal text-muted-foreground">/ {unit}</span>
+        {formatLevel(point.price, { isIndex, currency, decimals: 4 })}
+        <span className="font-normal text-muted-foreground">
+          {isIndex ? "index pts" : `/ ${unit}`}
+        </span>
       </p>
     </div>
   );
@@ -79,11 +96,17 @@ export function PriceChart({
   currency = "USD",
   unit = "unit",
   baseline,
+  isIndex = false,
 }: {
   data: PricePoint[];
   currency?: string;
   unit?: string;
   baseline?: number | null;
+  /**
+   * Set when the series is a price index. `currency` cannot carry this — it
+   * has a default, so passing undefined just falls back to USD.
+   */
+  isIndex?: boolean;
 }) {
   const [rangeIndex, setRangeIndex] = useState(1);
 
@@ -155,7 +178,9 @@ export function PriceChart({
               axisLine={false}
               width={62}
               domain={["auto", "auto"]}
-              tickFormatter={(value: number) => formatCurrency(value, currency, 0)}
+              tickFormatter={(value: number) =>
+                formatLevel(value, { isIndex, currency, decimals: 0 })
+              }
             />
 
             {baseline != null && (
@@ -173,7 +198,9 @@ export function PriceChart({
             )}
 
             <Tooltip
-              content={<ChartTooltip currency={currency} unit={unit} />}
+              content={
+                <ChartTooltip currency={currency} unit={unit} isIndex={isIndex} />
+              }
               cursor={{ stroke: "var(--viz-axis)", strokeWidth: 1 }}
             />
 
@@ -204,7 +231,8 @@ export function PriceChart({
         <p className="text-right text-xs text-muted-foreground">
           Latest{" "}
           <span className="font-medium text-foreground tabular-nums">
-            {formatCurrency(last.price, currency, 4)}
+            {formatLevel(last.price, { isIndex, currency, decimals: 4 })}
+            {isIndex && " index pts"}
           </span>{" "}
           on {tickDate(last.observed_on)} · {visible.length} observations
         </p>
