@@ -19,11 +19,13 @@ const EMPTY: AuthState = {};
 export function LoginForm({
   next,
   initialError,
+  initialMode = "signin",
 }: {
   next?: string;
   initialError?: string;
+  initialMode?: "signin" | "signup";
 }) {
-  const [mode, setMode] = useState<"signin" | "signup">("signin");
+  const [mode, setMode] = useState<"signin" | "signup">(initialMode);
   const action = mode === "signin" ? signIn : signUp;
   const [state, formAction, pending] = useActionState(action, EMPTY);
 
