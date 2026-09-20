@@ -3,6 +3,10 @@
 Incremental: each material resumes from its newest stored observation, so a
 daily run fetches a handful of rows. A newly mapped material backfills
 `backfill_days` of history in one go.
+
+Observations are converted into the shop's own purchasing unit on the way in
+(see units.py), so `price_points.price` is always in `materials.currency` per
+`materials.unit`. The raw FRED value is never stored.
 """
 
 from __future__ import annotations
@@ -14,6 +18,10 @@ from . import db, fred
 from .config import settings
 
 log = logging.getLogger(__name__)
+
+# Enough decimals for a cheap material quoted in a small unit (a gram of resin,
+# a board foot of pine) without carrying float noise into Postgres.
+PRICE_DECIMALS = 8
 
 
 def _start_date(material_id: str) -> date:
@@ -27,11 +35,14 @@ def _start_date(material_id: str) -> date:
 
 
 def _rows_for(material: dict, observations: list[fred.Observation]) -> list[dict]:
+    # A material mapped before the conversion columns existed, or one whose
+    # units couldn't be resolved, falls back to 1 and is stored as quoted.
+    factor = float(material.get("price_factor") or 1)
     return [
         {
             "material_id": material["id"],
             "observed_on": observation.observed_on.isoformat(),
-            "price": observation.value,
+            "price": round(observation.value * factor, PRICE_DECIMALS),
             "currency": material.get("currency") or "USD",
             "source": "fred",
         }
@@ -65,14 +76,38 @@ def run() -> int:
                 log.info("%s (%s): nothing new", material["name"], series_id)
                 continue
 
-            written = db.upsert_price_points(_rows_for(material, observations))
+            rows = _rows_for(material, observations)
+            written = db.upsert_price_points(rows)
             total += written
+
+            factor = float(material.get("price_factor") or 1)
+            latest = rows[-1]["price"]
+            if material.get("price_is_index"):
+                units_note = "index, unscaled"
+                latest_note = "{:.6g} index pts".format(latest)
+            else:
+                latest_note = "{:.6g} {}/{}".format(
+                    latest,
+                    material.get("currency") or "USD",
+                    material.get("unit") or "unit",
+                )
+                if factor == 1:
+                    units_note = "as quoted"
+                else:
+                    units_note = "{} -> {}, x{:.6g}".format(
+                        material.get("price_native_unit") or "?",
+                        material.get("unit") or "?",
+                        factor,
+                    )
+
             log.info(
-                "%s (%s): %d observations from %s",
+                "%s (%s): %d observations from %s [%s]; latest %s",
                 material["name"],
                 series_id,
                 written,
                 start.isoformat(),
+                units_note,
+                latest_note,
             )
         except Exception:
             log.exception("Sync failed for %r", material.get("name"))
