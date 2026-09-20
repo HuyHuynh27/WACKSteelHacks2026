@@ -115,6 +115,7 @@ def fetch_price_history(material_id: str, limit: int = 120) -> list[dict[str, An
         .table("price_points")
         .select("observed_on, price")
         .eq("material_id", material_id)
+        .eq("source", "fred")
         .order("observed_on", desc=True)
         .limit(limit)
         .execute()
